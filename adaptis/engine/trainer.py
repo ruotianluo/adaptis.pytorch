@@ -64,7 +64,7 @@ class AdaptISTrainer(object):
         if lr_scheduler is not None:
             self.lr_scheduler = lr_scheduler(optimizer=self.optim, T_max=num_epochs * len(self.train_loader))
             if args.start_epoch > 0:
-                for _ in range(args.start_epoch):
+                for _ in range(args.start_epoch * len(self.train_loader)):
                     self.lr_scheduler.step()
 
         if args.input_normalization:
