@@ -66,9 +66,3 @@ class AdaptIS(nn.Module):
             outputs.append(('proposals', proposals_out))
 
         return self.make_named_outputs(outputs)
-
-    def load_weights(self, path_to_weights):
-        current_state_dict = self.state_dict()
-        new_state_dict = torch.load(path_to_weights)
-        current_state_dict.update(new_state_dict)
-        self.load_state_dict(current_state_dict)

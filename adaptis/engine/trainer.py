@@ -84,7 +84,7 @@ class AdaptISTrainer(object):
     def _load_weights(self):
         if self.args.weights is not None:
             if os.path.isfile(self.args.weights):
-                self.net.load_weights(self.args.weights)
+                self.net.load_state_dict(torch.load(self.args.weights))
                 self.args.weights = None
             else:
                 raise RuntimeError(f"=> no checkpoint found at '{self.args.weights}'")
