@@ -24,7 +24,10 @@ class AdaptISTrainer(object):
                  lr_scheduler=None,
                  metrics=None,
                  additional_val_metrics=None,
-                 train_proposals=False):
+                 train_proposals=False,
+                 mp_distributed=False,
+                 rank=None,
+                 world_size=None):
         self.args = args
         self.model_cfg = model_cfg
         self.loss_cfg = loss_cfg
@@ -42,16 +45,40 @@ class AdaptISTrainer(object):
         self.task_prefix = ''
         self.summary_writer = None
 
+        self.mp_distributed = mp_distributed
+        if mp_distributed:
+            assert rank is not None and world_size is not None
+        self.rank, self.world_size = rank, world_size
+
         self.trainset = trainset
         self.valset = valset
-        self.train_loader = DataLoader(trainset, batch_size=args.batch_size, pin_memory=True,
-                                       shuffle=True, num_workers=args.workers, drop_last=True)
-        self.val_loader = DataLoader(valset, batch_size=args.val_batch_size, pin_memory=True,
+        if self.mp_distributed:
+            self.batch_size = int(args.batch_size / self.world_size)
+            self.val_batch_size = int(args.val_batch_size / self.world_size)
+            self.train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
+        else:
+            self.batch_size = args.batch_size
+            self.val_batch_size = args.val_batch_size
+            self.train_sampler = None
+        self.train_loader = DataLoader(trainset, batch_size=self.batch_size, pin_memory=True,
+                                       shuffle=(self.train_sampler is None),
+                                       num_workers=args.workers,
+                                       sampler=self.train_sampler,
+                                       drop_last=True)
+        self.val_loader = DataLoader(valset, batch_size=self.val_batch_size, pin_memory=True,
                                      shuffle=False, num_workers=args.workers, drop_last=True)
 
         self.device = args.device
-        log.logger.info(model)
-        self.net = model.to(self.device)
+
+        if self.is_main_process():
+            log.logger.info(model)
+        
+        model.to(self.device)
+        if self.mp_distributed:
+            self.net = torch.nn.parallel.DistributedDataParallel(model, device_ids=[self.rank],
+                                                                 find_unused_parameters=True)
+        else:
+            self.net = torch.nn.DataParallel(model)
         self.evaluator = None
         self._load_weights()
 
@@ -81,21 +108,34 @@ class AdaptISTrainer(object):
         else:
             self.denormalizator = lambda x: x
 
+
+    def is_main_process(self):
+        if self.mp_distributed:
+            return self.rank == 0
+        else:
+            return True
+
+
     def _load_weights(self):
         if self.args.weights is not None:
             if os.path.isfile(self.args.weights):
-                self.net.load_state_dict(torch.load(self.args.weights))
+                self.net.module.load_state_dict(torch.load(self.args.weights))
                 self.args.weights = None
             else:
                 raise RuntimeError(f"=> no checkpoint found at '{self.args.weights}'")
 
     def training(self, epoch):
-        if self.summary_writer is None:
+        if self.mp_distributed:
+            self.train_sampler.set_epoch(epoch)
+        if self.summary_writer is None and self.is_main_process():
             self.summary_writer = log.SummaryWriterAvg(log_dir=str(self.args.logs_path),
                                                        flush_secs=10, dump_period=self.tb_dump_period)
 
         log_prefix = 'Train' + self.task_prefix.capitalize()
-        tbar = tqdm(self.train_loader, file=self.tqdm_out, ncols=100)
+        if self.is_main_process():
+            tbar = tqdm(self.train_loader, file=self.tqdm_out, ncols=100)
+        else:
+            tbar = self.train_loader
         train_loss = 0.0
 
         for metric in self.train_metrics:
@@ -115,60 +155,68 @@ class AdaptISTrainer(object):
             loss = loss.detach().cpu().numpy().mean()
             train_loss += loss
 
-            for loss_name, loss_values in losses_logging.items():
+            if self.is_main_process():
+                for loss_name, loss_values in losses_logging.items():
+                    self.summary_writer.add_scalar(
+                        tag=f'{log_prefix}Losses/{loss_name}',
+                        value=np.array(loss_values).mean(),
+                        global_step=global_step
+                    )
                 self.summary_writer.add_scalar(
-                    tag=f'{log_prefix}Losses/{loss_name}',
-                    value=np.array(loss_values).mean(),
+                    tag=f'{log_prefix}Losses/overall',
+                    value=loss,
                     global_step=global_step
                 )
-            self.summary_writer.add_scalar(
-                tag=f'{log_prefix}Losses/overall',
-                value=loss,
-                global_step=global_step
-            )
 
-            for k, v in self.loss_cfg.items():
-                if '_loss' in k and hasattr(v, 'log_states') and self.loss_cfg.get(k + '_weight', 0.0) > 0:
-                    v.log_states(
-                        self.summary_writer,
-                        f'{log_prefix}Losses/{k}',
-                        global_step
-                    )
+                for k, v in self.loss_cfg.items():
+                    if '_loss' in k and hasattr(v, 'log_states') and self.loss_cfg.get(k + '_weight', 0.0) > 0:
+                        v.log_states(
+                            self.summary_writer,
+                            f'{log_prefix}Losses/{k}',
+                            global_step
+                        )
 
-            if self.image_dump_interval > 0 and global_step % self.image_dump_interval == 0:
-                self.save_visualization(batch_data, outputs, global_step, prefix='train')
+                if self.image_dump_interval > 0 and global_step % self.image_dump_interval == 0:
+                    self.save_visualization(batch_data, outputs, global_step, prefix='train')
 
-            self.summary_writer.add_scalar(
-                tag=f'{log_prefix}States/learning_rate',
-                value=self.lr if self.lr_scheduler is None else np.array(self.lr_scheduler.get_lr()).max(),
-                global_step=global_step
-            )
-
-            tbar.set_description(f'Epoch {epoch}, training loss {train_loss / (i + 1):.6f}')
-            for metric in self.train_metrics:
-                metric.log_states(
-                    self.summary_writer,
-                    f'{log_prefix}Metrics/{metric.name}',
-                    global_step
+                self.summary_writer.add_scalar(
+                    tag=f'{log_prefix}States/learning_rate',
+                    value=self.lr if self.lr_scheduler is None else np.array(self.lr_scheduler.get_lr()).max(),
+                    global_step=global_step
                 )
 
-        for metric in self.train_metrics:
-            self.summary_writer.add_scalar(
-                tag=f'{log_prefix}Metrics/{metric.name}',
-                value=metric.get_epoch_value(),
-                global_step=epoch, disable_avg=True)
+                tbar.set_description(f'Epoch {epoch}, training loss {train_loss / (i + 1):.6f}')
+                for metric in self.train_metrics:
+                    metric.log_states(
+                        self.summary_writer,
+                        f'{log_prefix}Metrics/{metric.name}',
+                        global_step
+                    )
+    
+        if self.is_main_process():
+            for metric in self.train_metrics:
+                self.summary_writer.add_scalar(
+                    tag=f'{log_prefix}Metrics/{metric.name}',
+                    value=metric.get_epoch_value(),
+                    global_step=epoch, disable_avg=True)
 
-        misc.save_checkpoint(self.net, self.args.checkpoints_path, prefix=self.task_prefix, epoch=None)
-        if epoch % self.checkpoint_interval == 0:
-            misc.save_checkpoint(self.net, self.args.checkpoints_path, prefix=self.task_prefix, epoch=epoch)
+            misc.save_checkpoint(self.net.module, self.args.checkpoints_path, prefix=self.task_prefix, epoch=None)
+            if epoch % self.checkpoint_interval == 0:
+                misc.save_checkpoint(self.net.module, self.args.checkpoints_path, prefix=self.task_prefix, epoch=epoch)
 
     def validation(self, epoch):
-        if self.summary_writer is None:
+        # All the nodes do the validation, a waste of gpu.
+        # But i don't know what's the better way?
+
+        if self.summary_writer is None and self.is_main_process():
             self.summary_writer = log.SummaryWriterAvg(log_dir=str(self.args.logs_path),
                                                        flush_secs=10, dump_period=self.tb_dump_period)
 
         log_prefix = 'Val' + self.task_prefix.capitalize()
-        tbar = tqdm(self.val_loader, file=self.tqdm_out, ncols=100)
+        if self.is_main_process():
+            tbar = tqdm(self.val_loader, file=self.tqdm_out, ncols=100)
+        else:
+            tbar = self.val_loader
 
         for metric in self.val_metrics:
             metric.reset_epoch_stats()
@@ -189,32 +237,34 @@ class AdaptISTrainer(object):
             val_loss += loss
             num_batches += 1
 
-            tbar.set_description(f'Epoch {epoch}, validation loss: {val_loss / num_batches:.6f}')
-            for metric in self.val_metrics:
-                metric.log_states(
-                    self.summary_writer,
-                    f'{log_prefix}Metrics/{metric.name}',
-                    global_step
+            if self.is_main_process():
+                tbar.set_description(f'Epoch {epoch}, validation loss: {val_loss / num_batches:.6f}')
+                for metric in self.val_metrics:
+                    metric.log_states(
+                        self.summary_writer,
+                        f'{log_prefix}Metrics/{metric.name}',
+                        global_step
+                    )
+
+        if self.is_main_process():
+            for loss_name, loss_values in losses_logging.items():
+                self.summary_writer.add_scalar(
+                    tag=f'{log_prefix}Losses/{loss_name}',
+                    value=np.array(loss_values).mean(),
+                    global_step=epoch, disable_avg=True
                 )
 
-        for loss_name, loss_values in losses_logging.items():
+            for metric in self.val_metrics:
+                self.summary_writer.add_scalar(
+                    tag=f'{log_prefix}Metrics/{metric.name}',
+                    value=metric.get_epoch_value(),
+                    global_step=epoch, disable_avg=True
+                )
             self.summary_writer.add_scalar(
-                tag=f'{log_prefix}Losses/{loss_name}',
-                value=np.array(loss_values).mean(),
+                tag=f'{log_prefix}Losses/overall',
+                value=val_loss / num_batches,
                 global_step=epoch, disable_avg=True
             )
-
-        for metric in self.val_metrics:
-            self.summary_writer.add_scalar(
-                tag=f'{log_prefix}Metrics/{metric.name}',
-                value=metric.get_epoch_value(),
-                global_step=epoch, disable_avg=True
-            )
-        self.summary_writer.add_scalar(
-            tag=f'{log_prefix}Losses/overall',
-            value=val_loss / num_batches,
-            global_step=epoch, disable_avg=True
-        )
         self.net.train(True)
 
     def save_visualization(self, batch_data, outputs, global_step, prefix):

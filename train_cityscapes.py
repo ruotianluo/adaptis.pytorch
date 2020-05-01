@@ -25,7 +25,7 @@ def add_exp_args(parser):
     return parser
 
 
-def init_model():
+def init_model(args):
     model_cfg = edict()
     model_cfg.syncbn = True
     model_cfg.crop_size = (400, 720)
@@ -54,7 +54,14 @@ def init_model():
     return model, model_cfg
 
 
-def train(model, model_cfg, args, train_proposals, start_epoch=0):
+def scale_func(image_shape):
+    return random.uniform(0.85, 1.15)
+
+
+def train(model, model_cfg, args, train_proposals, start_epoch=0,
+          rank=None,
+          mp_distributed=False,
+          world_size=None):
     args.val_batch_size = args.batch_size
     args.input_normalization = model_cfg.input_normalization
     crop_size = model_cfg.crop_size
@@ -91,9 +98,6 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0):
         PadIfNeeded(min_height=crop_size[0], min_width=crop_size[1], border_mode=0),
         RandomCrop(*crop_size)
     ], p=1.0)
-
-    def scale_func(image_shape):
-        return random.uniform(0.85, 1.15)
 
     trainset = CityscapesDataset(
         args.dataset_path,
@@ -149,7 +153,10 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0):
                              checkpoint_interval=40 if not train_proposals else 2,
                              image_dump_interval=100 if not train_proposals else -1,
                              train_proposals=train_proposals,
-                             metrics=[AdaptiveIoU()])
+                             metrics=[AdaptiveIoU()],
+                             rank=rank,
+                             mp_distributed=mp_distributed,
+                             world_size=world_size)
 
     log.logger.info(f'Starting Epoch: {start_epoch}')
     log.logger.info(f'Total Epochs: {num_epochs}')
@@ -157,12 +164,36 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0):
         trainer.training(epoch)
         trainer.validation(epoch)
 
+def main(rank, ngpus, args, port):
+    distributed = rank is not None  # and not debug
+    if distributed:  # multiprocess distributed training
+        dist.init_process_group(
+            world_size=ngpus, rank=rank,
+            backend='nccl', init_method=f'tcp://127.0.0.1:{port}',
+        )
+        torch.cuda.set_device(rank)
+
+    model, model_cfg = init_model(args)
+    train(model, model_cfg, args, train_proposals=False,
+          start_epoch=args.start_epoch,
+          rank=rank,
+          mp_distributed=distributed,
+          world_size=ngpus)
+    model.add_proposals_head()
+    train(model, model_cfg, args, train_proposals=True,
+          start_epoch=args.start_epoch,
+          rank=rank,
+          mp_distributed=distributed,
+          world_size=ngpus)
+
 
 if __name__ == '__main__':
     args = init_experiment('cityscapes', add_exp_args, script_path=__file__)
 
-    model, model_cfg = init_model()
-    train(model, model_cfg, args, train_proposals=False,
-          start_epoch=args.start_epoch)
-    model.add_proposals_head()
-    train(model, model_cfg, args, train_proposals=True)
+    ngpus = torch.cuda.device_count()
+    port = random.randint(10000, 20000)
+    argv = (ngpus, args, port)
+    if args.dist:
+        mp.spawn(main, nprocs=ngpus, args=argv)
+    else:
+        main(None, *argv)

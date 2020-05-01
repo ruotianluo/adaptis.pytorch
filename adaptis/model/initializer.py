@@ -14,7 +14,7 @@ class Initializer(object):
 
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
                           nn.InstanceNorm1d, nn.InstanceNorm2d, nn.InstanceNorm3d,
-                          nn.GroupNorm)):
+                          nn.GroupNorm, nn.SyncBatchNorm)):
             if m.weight is not None:
                 self._init_gamma(m.weight.data)
             if m.bias is not None:

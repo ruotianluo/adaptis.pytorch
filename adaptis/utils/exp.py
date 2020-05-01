@@ -52,12 +52,16 @@ def init_experiment(experiment_name, add_exp_args, script_path=None):
         logger.info('Using CPU')
         args.device = torch.device('cpu')
     else:
+        args.device = torch.device('cuda')
         if args.gpus:
-            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-            os.environ["CUDA_VISIBLE_DEVICES"] = f"{args.gpus.split(',')[0]}"
-        args.device = torch.device(f'cuda:{0}')
-        args.ngpus = 1
-        logger.info(f'Number of GPUs: {args.ngpus}')
+            os.environ["CUDA_VISIBLE_DEVICES"] = f"{args.gpus}"
+            args.ngpus = len(args.gpus.split(','))
+            logger.info(f'Number of GPUs: {args.ngpus}')
+        else:
+            args.ngpus = torch.cuda.device_count()
+
+        if args.ngpus > 1:
+            assert args.dist, '--dist need to be on for multi-gpu training'
 
         if args.ngpus < 2:
             args.syncbn = False

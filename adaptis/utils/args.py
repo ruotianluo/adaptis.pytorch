@@ -15,6 +15,9 @@ def get_common_arguments():
 
     parser.add_argument('--gpus', type=str, default='', required=False)
 
+    parser.add_argument('--dist', action='store_true', default=False,
+                        help='use distributed training')
+
     parser.add_argument('--batch-size', type=int, default=8)
 
     parser.add_argument('--exp-name', type=str, default='',
