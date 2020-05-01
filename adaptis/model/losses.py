@@ -25,6 +25,8 @@ class NormalizedFocalLossSoftmax(nn.Module):
         softmaxout = F.softmax(pred, dim=1)
 
         t = label != self._ignore_label
+        # label can't be negative because gather will fail (ignore_label may be negative)
+        label = label.relu()
         pt = torch.gather(softmaxout, index=label.long(), dim=1)
         pt = torch.where(t, pt, torch.ones_like(pt))
         beta = (1 - pt) ** self._gamma
@@ -35,7 +37,7 @@ class NormalizedFocalLossSoftmax(nn.Module):
         if self._detach_delimeter:
             mult = mult.detach()
         beta = beta * mult
-        self._k_sum = 0.9 * self._k_sum + 0.1 * mult.cpu().numpy().mean()
+        self._k_sum = 0.9 * self._k_sum + 0.1 * mult.mean().item()
 
         loss = -beta * torch.log(torch.min(pt + self._eps, torch.ones(1, dtype=torch.float).to(pt.device)))
 
