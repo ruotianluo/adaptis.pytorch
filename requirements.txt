@@ -14,3 +14,6 @@ opencv-python-headless
 albumentations
 pytorch
 torchvision
+gluoncv==0.4.0b20190301
+mxnet-cu100
+gluoncv-torch

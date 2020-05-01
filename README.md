@@ -59,6 +59,22 @@ You can train model for the toy dataset (original from the paper) by the followi
 python3 train_toy.py --batch-size=14 --workers=2 --gpus=0 --dataset-path=<toy-dataset-path>
 ```
 
+To train ResNet-50 model for Cityscapes use the script:
+```
+python3 train_cityscapes.py --batch-size=8 --workers=2 --dist --gpus=0,1 --dataset-path=<cityscapes-path>
+```
+
+(Note that, you need to convert gluon resnet weights into pytorch)
+```
+import torch
+import mxnet as mx
+from gluoncv.model_zoo.model_store import get_model_file
+state_dict = mx.ndarray.load(
+    get_model_file('resnet50_v1s', tag=True, root='~/.mxnet/models'))
+state_dict = {k.replace('gamma', 'weight').replace('beta', 'bias'):\
+              torch.from_numpy(v.asnumpy()) for k,v in state_dict.items()}
+torch.save(state_dict, 'resnet50_v1s.pth')
+```
 
 ### License
 The code of AdaptIS is released under the MPL 2.0 License. MPL is a copyleft license that is easy to comply with. You must make the source code for any of your changes available under MPL, but you can combine the MPL software with proprietary code, as long as you keep the MPL code in separate files.
