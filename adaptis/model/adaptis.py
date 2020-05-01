@@ -72,12 +72,3 @@ class AdaptIS(nn.Module):
         new_state_dict = torch.load(path_to_weights)
         current_state_dict.update(new_state_dict)
         self.load_state_dict(current_state_dict)
-        
-    def get_trainable_params(self):
-        trainable_params = []
-
-        for param in self.parameters():
-            if param.requires_grad:
-                trainable_params.append(param)
-
-        return trainable_params
