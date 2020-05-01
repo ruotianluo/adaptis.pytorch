@@ -124,6 +124,17 @@ class AdaptISTrainer(object):
             else:
                 raise RuntimeError(f"=> no checkpoint found at '{self.args.weights}'")
 
+
+    def state_dict(self, epoch=None):
+        state_dict = dict(
+            curr_epoch=epoch,
+            model_state=self.net.module.state_dict(),
+            optim_state=self.optim.state_dict(),
+            lr_scheduler_state=self.lr_scheduler.state_dict(),
+        )
+        return state_dict
+
+
     def training(self, epoch):
         if self.mp_distributed:
             self.train_sampler.set_epoch(epoch)
@@ -200,9 +211,9 @@ class AdaptISTrainer(object):
                     value=metric.get_epoch_value(),
                     global_step=epoch, disable_avg=True)
 
-            misc.save_checkpoint(self.net.module, self.args.checkpoints_path, prefix=self.task_prefix, epoch=None)
+            misc.save_checkpoint(self.state_dict(epoch), self.args.checkpoints_path, prefix=self.task_prefix, epoch=None)
             if epoch % self.checkpoint_interval == 0:
-                misc.save_checkpoint(self.net.module, self.args.checkpoints_path, prefix=self.task_prefix, epoch=epoch)
+                misc.save_checkpoint(self.state_dict(epoch), self.args.checkpoints_path, prefix=self.task_prefix, epoch=epoch)
 
     def validation(self, epoch):
         # All the nodes do the validation, a waste of gpu.
