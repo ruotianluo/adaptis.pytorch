@@ -158,6 +158,9 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0,
                              mp_distributed=mp_distributed,
                              world_size=world_size)
 
+    if args.resume:
+        start_epoch = trainer.load_last_checkpoint() + 1
+
     log.logger.info(f'Starting Epoch: {start_epoch}')
     log.logger.info(f'Total Epochs: {num_epochs}')
     for epoch in range(start_epoch, num_epochs):

@@ -125,6 +125,29 @@ class AdaptISTrainer(object):
                 raise RuntimeError(f"=> no checkpoint found at '{self.args.weights}'")
 
 
+    def load_last_checkpoint(self):
+        # Used when resuming training
+        # Return start_epoch
+        checkpoint_name = 'last_checkpoint.pth'
+        if self.task_prefix:
+            checkpoint_name = f'{self.task_prefix}_{checkpoint_name}'
+
+        checkpoint_path = self.args.checkpoints_path / checkpoint_name
+        if os.path.isfile(checkpoint_path):
+            state_dict = torch.load(checkpoint_path, map_location='cpu')
+            self.load_state_dict(state_dict)
+            return state_dict['curr_epoch']
+        else:
+            log.logger.info('%s not found' %checkpoint_path)
+            return -1
+
+
+    def load_state_dict(self, state_dict):
+        self.net.module.load_state_dict(state_dict['model_state'])
+        self.optim.load_state_dict(state_dict['optim_state'])
+        self.lr_scheduler.load_state_dict(state_dict['lr_scheduler_state'])
+
+
     def state_dict(self, epoch=None):
         state_dict = dict(
             curr_epoch=epoch,

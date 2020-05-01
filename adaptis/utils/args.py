@@ -34,6 +34,11 @@ def get_train_arguments():
     parser.add_argument('--weights', type=str, default=None,
                         help='Put the path to resuming file if needed')
 
+    parser.add_argument('--resume', action='store_true', default=False,
+                        help='Automatic resume from last checkpoint')
+    parser.add_argument('--resume_exp_name', type=str, default=None,
+                        help='The exp_name to resume from')
+
     parser.add_argument('--val-batch-size', type=int, default=8)
 
     parser.add_argument('--no-exp', action='store_true', default=False,
