@@ -1,25 +1,26 @@
-import mxnet as mx
-from mxnet import gluon
+import torch
+import torch.nn as nn
 
 from adaptis.model.cityscapes.deeplab_v3 import DeepLabV3Plus
 from adaptis.model.adaptis import AdaptIS
 from adaptis.model.ops import AdaIN, ExtractQueryFeatures, AppendCoordFeatures
 from adaptis.model.basic_blocks import SepConvHead, FCController, SeparableConv2D
-from .resnet_fpn import SemanticFPNHead, ResNetFPN
+# from .resnet_fpn import SemanticFPNHead, ResNetFPN
 
 
 def get_cityscapes_model(num_classes, norm_layer, backbone='resnet50',
                          with_proposals=False):
     model = AdaptIS(
-        feature_extractor=DeepLabV3Plus(backbone=backbone, norm_layer=norm_layer),
+        backbone=DeepLabV3Plus(backbone=backbone, norm_layer=norm_layer),
         adaptis_head=CityscapesAdaptISHead(
-            FCController(3 * [128], norm_layer=norm_layer),
-            ch=128, norm_radius=280,
+            FCController(256, 3 * [128], norm_layer=norm_layer),
+            in_channels=256,
+            out_channels=128, norm_radius=280,
             spatial_scale=1.0/4.0,
             norm_layer=norm_layer
         ),
-        segmentation_head=SepConvHead(num_classes, channels=192, in_channels=256, num_layers=2, norm_layer=norm_layer),
-        proposal_head=SepConvHead(1, channels=128, in_channels=256, num_layers=2,
+        segmentation_head=SepConvHead(num_classes, in_channels=256, out_channels=192, num_layers=2, norm_layer=norm_layer),
+        proposal_head=SepConvHead(1, in_channels=256, out_channels=128, num_layers=2,
                                   dropout_ratio=0.5, dropout_indx=0, norm_layer=norm_layer),
         with_proposals=with_proposals,
         spatial_scale=1.0/4.0
@@ -28,63 +29,70 @@ def get_cityscapes_model(num_classes, norm_layer, backbone='resnet50',
     return model
 
 
-def get_fpn_model(num_classes, norm_layer, backbone='resnet50',
-                         with_proposals=False):
-    model = AdaptIS(
-        feature_extractor=ResNetFPN(backbone=backbone, norm_layer=norm_layer),
-        adaptis_head=CityscapesAdaptISHead(
-            FCController(3 * [128], norm_layer=norm_layer),
-            ch=128, norm_radius=280,
-            spatial_scale=1.0/4.0,
-            norm_layer=norm_layer
-        ),
-        segmentation_head=SemanticFPNHead(num_classes, output_channels=256, norm_layer=norm_layer),
-        proposal_head=SepConvHead(1, channels=128, in_channels=256, num_layers=2,
-                                  dropout_ratio=0.5, dropout_indx=0, norm_layer=norm_layer),
-        with_proposals=with_proposals,
-        spatial_scale=1.0/4.0
-    )
-    return model
+# def get_fpn_model(num_classes, norm_layer, backbone='resnet50',
+#                          with_proposals=False):
+#     model = AdaptIS(
+#         feature_extractor=ResNetFPN(backbone=backbone, norm_layer=norm_layer),
+#         adaptis_head=CityscapesAdaptISHead(
+#             FCController(256, 3 * [128], norm_layer=norm_layer),
+#             in_channels=512, out_channels=128, norm_radius=280,
+#             spatial_scale=1.0/4.0,
+#             norm_layer=norm_layer
+#         ),
+#         segmentation_head=SemanticFPNHead(num_classes, output_channels=256, norm_layer=norm_layer),
+#         proposal_head=SepConvHead(1, channels=128, in_channels=256, num_layers=2,
+#                                   dropout_ratio=0.5, dropout_indx=0, norm_layer=norm_layer),
+#         with_proposals=with_proposals,
+#         spatial_scale=1.0/4.0
+#     )
+#     return model
 
 
-class CityscapesAdaptISHead(gluon.HybridBlock):
-    def __init__(self, controller_net, ch=128, norm_radius=190, spatial_scale=0.25,
-                 norm_layer=gluon.nn.BatchNorm):
+class CityscapesAdaptISHead(nn.Module):
+    def __init__(self, controller_net, in_channels, out_channels=128, norm_radius=190, spatial_scale=0.25,
+                 norm_layer=nn.BatchNorm2d):
         super(CityscapesAdaptISHead, self).__init__()
 
         self.num_points = None
-        with self.name_scope():
-            self.eqf = ExtractQueryFeatures(extraction_method='ROIAlign', spatial_scale=spatial_scale)
-            self.controller_net = controller_net
 
-            self.add_coord_features = AppendCoordFeatures(norm_radius=norm_radius, spatial_scale=spatial_scale)
+        self.eqf = ExtractQueryFeatures(extraction_method='ROIAlign', spatial_scale=spatial_scale)
+        self.controller_net = controller_net
 
-            self.block0 = gluon.nn.HybridSequential()
-            self.block0.add(
-                gluon.nn.Conv2D(channels=ch, kernel_size=3, padding=1, activation='relu'),
-                norm_layer(in_channels=ch),
-                SeparableConv2D(ch, in_channels=ch, dw_kernel=3, dw_padding=1,
+        self.add_coord_features = AppendCoordFeatures(norm_radius=norm_radius, spatial_scale=spatial_scale)
+        in_channels += 2
+        if self.add_coord_features.append_dist:
+            in_channels += 1
+
+        block0 = []
+        block0.extend([
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(True),
+            norm_layer(out_channels),
+            SeparableConv2D(out_channels, out_channels, dw_kernel=3, dw_padding=1,
+                            norm_layer=norm_layer, activation='relu'),
+            nn.Conv2d(out_channels, out_channels, kernel_size=1, padding=0),
+            nn.LeakyReLU(0.2)
+        ])
+        self.block0 = nn.Sequential(*block0)
+
+        self.adain = AdaIN(out_channels, out_channels)
+
+        block1 = []
+        for i in range(3):
+            block1.append(
+                SeparableConv2D(in_channels=min(out_channels, 2 * out_channels // (2 ** i)),
+                                out_channels=out_channels // (2 ** i),
+                                dw_kernel=3, dw_padding=1,
                                 norm_layer=norm_layer, activation='relu'),
-                gluon.nn.Conv2D(channels=ch, kernel_size=1, padding=0),
-                gluon.nn.LeakyReLU(0.2)
             )
+        block1.append(nn.Conv2d(out_channels // (2 ** i), 1, kernel_size=1))
+        self.block1 = nn.Sequential(*block1)
 
-            self.adain = AdaIN(ch)
+    def forward(self, p1_features, points):
+        adaptive_input, controller_input = self._get_point_invariant_features(p1_features)
+        return self._get_instance_maps(points, adaptive_input, controller_input)
 
-            self.block1 = gluon.nn.HybridSequential()
-            for i in range(3):
-                self.block1.add(
-                    SeparableConv2D(ch // (2 ** i), in_channels=min(ch, 2 * ch // (2 ** i)),
-                                    dw_kernel=3, dw_padding=1,
-                                    norm_layer=norm_layer, activation='relu'),
-                )
-            self.block1.add(gluon.nn.Conv2D(channels=1, kernel_size=1))
-
-    def hybrid_forward(self, F, p1_features, points):
-        adaptive_input, controller_input = self.get_point_invariant_states(F, p1_features)
-        return self.get_instances_maps(F, points, adaptive_input, controller_input)
-
-    def get_point_invariant_states(self, F, backbone_features):
+    def _get_point_invariant_features(self, backbone_features):
         adaptive_input = backbone_features
 
         if getattr(self.controller_net, 'return_map', False):
@@ -94,8 +102,8 @@ class CityscapesAdaptISHead(gluon.HybridBlock):
 
         return adaptive_input, controller_input
 
-    def get_instances_maps(self, F, points, adaptive_input, controller_input):
-        if isinstance(points, mx.nd.NDArray):
+    def _get_instance_maps(self, points, adaptive_input, controller_input):
+        if torch.is_tensor(points):
             self.num_points = points.shape[1]
 
         if getattr(self.controller_net, 'return_map', False):
@@ -104,8 +112,8 @@ class CityscapesAdaptISHead(gluon.HybridBlock):
             w = self.eqf(controller_input, points)
             w = self.controller_net(w)
 
-        points = F.reshape(points, shape=(-1, 2))
-        x = F.repeat(adaptive_input, self.num_points, axis=0)
+        points = points.reshape(-1, 2)
+        x = torch.stack([adaptive_input] * self.num_points, 1).reshape(-1, *adaptive_input.shape[1:])
         x = self.add_coord_features(x, points)
 
         x = self.block0(x)

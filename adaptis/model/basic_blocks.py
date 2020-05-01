@@ -35,7 +35,7 @@ class FCController(nn.Module):
         controller = []
         for hidden_size in layers_sizes:
             controller.extend([
-                nn.Linear(input_size, hidden_size),
+                nn.Conv2d(input_size, hidden_size, kernel_size=1),
                 _activation(),
                 norm_layer(hidden_size) if norm_layer is not None else nn.Identity()
             ])
@@ -43,7 +43,10 @@ class FCController(nn.Module):
         self.controller = nn.Sequential(*controller)
 
     def forward(self, x):
-        return self.controller(x)
+        if len(x.shape) == 2:
+            x = x[:, :, None, None]
+        x = self.controller(x)
+        return x.squeeze(-1).squeeze(-1)
 
 
 class SimpleConvController(nn.Module):
@@ -69,3 +72,55 @@ class SimpleConvController(nn.Module):
     def forward(self, x):
         x = self.controller(x)
         return x
+
+
+class SepConvHead(nn.Module):
+    def __init__(self, num_outputs, in_channels, out_channels, num_layers=1,
+                 kernel_size=3, padding=1, dropout_ratio=0.0, dropout_indx=0,
+                 norm_layer=nn.BatchNorm2d):
+        super(SepConvHead, self).__init__()
+
+        layers = []
+
+        for i in range(num_layers):
+            layers.append(
+                SeparableConv2D(in_channels if i == 0 else out_channels,
+                                out_channels,
+                                dw_kernel=kernel_size, dw_padding=padding,
+                                norm_layer=norm_layer, activation='relu')
+            )
+            if dropout_ratio > 0 and dropout_indx == i:
+                layers.append(nn.Dropout(dropout_ratio))
+
+        layers.append(
+            nn.Conv2d(out_channels, num_outputs, kernel_size=1, padding=0)
+        )
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, *inputs):
+        x = inputs[0]
+
+        return self.layers(x)
+
+
+class SeparableConv2D(nn.Module):
+    def __init__(self, in_channels, out_channels, dw_kernel, dw_padding, dw_stride=1,
+                 activation=None, use_bias=False, norm_layer=None):
+        super(SeparableConv2D, self).__init__()
+        body = []
+        _activation = ops.select_activation_function(activation)
+        body.append(nn.Conv2d(in_channels, in_channels, kernel_size=dw_kernel,
+                                stride=dw_stride, padding=dw_padding,
+                                bias=use_bias,
+                                groups=in_channels))
+        body.append(nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=use_bias))
+
+        if norm_layer:
+            body.append(norm_layer(out_channels))
+        if activation:
+            body.append(_activation())
+
+        self.body = nn.Sequential(*body)
+
+    def forward(self, x):
+        return self.body(x)

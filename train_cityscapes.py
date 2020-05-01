@@ -1,21 +1,23 @@
-import mxnet as mx
+import torch
+import torch.multiprocessing as mp
+import torch.distributed as dist
+from torchvision import transforms
 import random
-from mxnet.gluon.data.vision import transforms
 from functools import partial
-from gluoncv.utils import LRScheduler
 from easydict import EasyDict as edict
 from albumentations import (
     Compose, HorizontalFlip, ShiftScaleRotate, PadIfNeeded, RandomCrop,
     RGBShift, RandomBrightness, RandomContrast
 )
 
-from adaptis.engine.trainer import AdaptISTrainer, init_proposals_head
+from adaptis.engine.trainer import AdaptISTrainer
 from adaptis.model.cityscapes.models import get_cityscapes_model
 from adaptis.model.losses import NormalizedFocalLossSigmoid, NormalizedFocalLossSoftmax, AdaptISProposalsLossIoU
 from adaptis.model.metrics import AdaptiveIoU
 from adaptis.data.cityscapes import CityscapesDataset
+from adaptis.utils import log
+from adaptis.model import initializer
 from adaptis.utils.exp import init_experiment
-from adaptis.utils.log import logger
 
 
 def add_exp_args(parser):
@@ -40,14 +42,14 @@ def init_model():
     ])
 
     if args.ngpus > 1 and model_cfg.syncbn:
-        norm_layer = partial(mx.gluon.contrib.nn.SyncBatchNorm, num_devices=args.ngpus)
+        norm_layer = torch.nn.SyncBatchNorm
     else:
-        norm_layer = mx.gluon.nn.BatchNorm
+        norm_layer = torch.nn.BatchNorm2d
 
     model = get_cityscapes_model(num_classes=19, norm_layer=norm_layer,
                                  backbone='resnet50')
-    model.initialize(mx.init.Xavier(rnd_type='gaussian', magnitude=2), ctx=mx.cpu(0))
-    model.feature_extractor.load_pretrained_weights()
+    model.apply(initializer.XavierGluon(rnd_type='gaussian', magnitude=2.0))
+    model.backbone.load_pretrained_weights()
 
     return model, model_cfg
 
@@ -104,7 +106,7 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0):
         min_object_area=80,
         sample_ignore_object_prob=0.025,
         keep_background_prob=0.05,
-        image_rescale=scale_func,
+        get_image_scale=scale_func,
         use_jpeg=False
     )
 
@@ -117,39 +119,40 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0):
         points_from_one_object=train_proposals,
         input_transform=model_cfg.input_transform,
         min_object_area=80,
-        image_rescale=scale_func,
+        get_image_scale=scale_func,
         use_jpeg=False
     )
 
     if not train_proposals:
         optimizer_params = {
-            'learning_rate': 0.01,
-            'momentum': 0.9, 'wd': 1e-4
+            'lr': 0.01,
+            'momentum': 0.9, 'weight_decay': 1e-4
         }
-        lr_scheduler = partial(LRScheduler, mode='poly', baselr=optimizer_params['learning_rate'],
-                               nepochs=num_epochs)
+        lr_scheduler = lambda *args, **kwargs: \
+                        partial(torch.optim.lr_scheduler.LambdaLR,
+                               lr_lambda=lambda x: (1 - x / kwargs['T_max']) ** 0.9,
+                               last_epoch=-1)(*args, **{k:v for k,v in kwargs.items() if k != 'T_max'})
     else:
         optimizer_params = {
-            'learning_rate': 5e-4,
-            'beta1': 0.9, 'beta2': 0.999, 'epsilon': 1e-8
+            'lr': 5e-4,
+            'betas': (0.9, 0.999), 'eps': 1e-8
         }
-        lr_scheduler = partial(LRScheduler, mode='cosine',
-                               baselr=optimizer_params['learning_rate'],
-                               nepochs=num_epochs)
+        lr_scheduler = partial(torch.optim.lr_scheduler.CosineAnnealingLR,
+                               last_epoch=-1)
 
     trainer = AdaptISTrainer(args, model, model_cfg, loss_cfg,
                              trainset, valset,
+                             num_epochs=num_epochs,
                              optimizer='sgd' if not train_proposals else 'adam',
                              optimizer_params=optimizer_params,
                              lr_scheduler=lr_scheduler,
                              checkpoint_interval=40 if not train_proposals else 2,
                              image_dump_interval=100 if not train_proposals else -1,
                              train_proposals=train_proposals,
-                             hybridize_model=not train_proposals,
                              metrics=[AdaptiveIoU()])
 
-    logger.info(f'Starting Epoch: {start_epoch}')
-    logger.info(f'Total Epochs: {num_epochs}')
+    log.logger.info(f'Starting Epoch: {start_epoch}')
+    log.logger.info(f'Total Epochs: {num_epochs}')
     for epoch in range(start_epoch, num_epochs):
         trainer.training(epoch)
         trainer.validation(epoch)
@@ -161,5 +164,5 @@ if __name__ == '__main__':
     model, model_cfg = init_model()
     train(model, model_cfg, args, train_proposals=False,
           start_epoch=args.start_epoch)
-    init_proposals_head(model, args.ctx)
+    model.add_proposals_head()
     train(model, model_cfg, args, train_proposals=True)

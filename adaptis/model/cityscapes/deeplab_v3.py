@@ -1,11 +1,11 @@
-from mxnet import gluon
-from mxnet.gluon import nn
-from mxnet.gluon.nn import HybridBlock
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from adaptis.model.basic_blocks import SeparableConv2D
 from .resnet import ResNetBackbone
+from torchvision.models.segmentation.deeplabv3 import ASPP
 
-
-class DeepLabV3Plus(gluon.HybridBlock):
+class DeepLabV3Plus(nn.Module):
     def __init__(self, backbone='resnet50', backbone_lr_mult=0.1, **kwargs):
         super(DeepLabV3Plus, self).__init__()
 
@@ -14,24 +14,34 @@ class DeepLabV3Plus(gluon.HybridBlock):
         self.backbone_lr_mult = backbone_lr_mult
         self._kwargs = kwargs
 
-        with self.name_scope():
-            self.backbone = ResNetBackbone(backbone=self.backbone_name, pretrained_base=False, **kwargs)
+        self.backbone = ResNetBackbone(backbone=self.backbone_name, pretrained_base=False, **kwargs)
 
-            self.head = _DeepLabHead(256, in_filters=256 + 32, **kwargs)
-            self.skip_project = _SkipProject(32, **kwargs)
-            self.aspp = _ASPP(2048, [12, 24, 36], **kwargs)
+        self.head = _DeepLabHead(in_channels=256 + 32, out_channels=256, **kwargs)
+        self.skip_project = _SkipProject(256, 32, **kwargs)
+        # this ASPP is almost the same as torchvision.models.segmentation.deeplabv3.ASPP
+        # except it takes norm_layer as a argument
+        self.aspp = _ASPP(2048, 256, [12, 24, 36], **kwargs)
 
     def load_pretrained_weights(self):
-        pretrained = ResNetBackbone(backbone=self.backbone_name, pretrained_base=True, **self._kwargs)
-        backbone_params = self.backbone.collect_params()
-        pretrained_weights = pretrained.collect_params()
-        for k, v in pretrained_weights.items():
-            param_name = backbone_params.prefix + k[len(pretrained_weights.prefix):]
-            backbone_params[param_name].set_data(v.data())
+        # load from gluon
+        # Unfortunately that's the only way
 
-        self.backbone.collect_params().setattr('lr_mult', self.backbone_lr_mult)
+        # import mxnet as mx
+        # from gluoncv.model_zoo.model_store import get_model_file
+        # state_dict = mx.ndarray.load(
+        #     get_model_file(self.backbone_name+'_v1s', tag=True, root='~/.mxnet/models'))
+        # state_dict = {k.replace('gamma', 'weight').replace('beta', 'bias'):\
+        #               torch.from_numpy(v.asnumpy()) for k,v in state_dict.items()}
+        
+        # The above works for single process.
+        # For some reason, mx.load doesn't work with mulitprocessing
+        # We preprocess the gluon weights and save it in the root
+        state_dict = torch.load('resnet50_v1s.pth')
+        self.backbone.load_state_dict(state_dict, strict=False)
+        for p in self.backbone.parameters():
+            p.lr_mult = self.backbone_lr_mult
 
-    def hybrid_forward(self, F, x):
+    def forward(self, x):
         c1, _, c3, c4 = self.backbone(x)
         c1 = self.skip_project(c1)
 
@@ -39,99 +49,87 @@ class DeepLabV3Plus(gluon.HybridBlock):
             self._c1_shape = c1.shape
 
         x = self.aspp(c4)
-        x = F.contrib.BilinearResize2D(x, height=self._c1_shape[2], width=self._c1_shape[3])
-        x = F.concat(x, c1, dim=1)
+        x = F.interpolate(x, (self._c1_shape[2], self._c1_shape[3]), mode='bilinear')
+        x = torch.cat([x, c1], 1)
         x = self.head(x)
 
-        return x,
+        return x
 
 
-class _SkipProject(HybridBlock):
-    def __init__(self, out_channels, norm_layer=nn.BatchNorm):
+class _SkipProject(nn.Module):
+    def __init__(self, in_channels, out_channels, norm_layer=nn.BatchNorm2d):
         super(_SkipProject, self).__init__()
 
-        with self.name_scope():
-            self.skip_project = nn.HybridSequential()
-            self.skip_project.add(nn.Conv2D(out_channels, kernel_size=1, use_bias=False))
-            self.skip_project.add(norm_layer(in_channels=out_channels))
-            self.skip_project.add(nn.Activation("relu"))
+        self.skip_project = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+            norm_layer(out_channels),
+            nn.ReLU(True))
 
-    def hybrid_forward(self, F, x):
+    def forward(self, x):
         return self.skip_project(x)
 
 
-class _DeepLabHead(HybridBlock):
-    def __init__(self, output_channels, in_filters, norm_layer=nn.BatchNorm):
+class _DeepLabHead(nn.Module):
+    def __init__(self, in_channels, out_channels, norm_layer=nn.BatchNorm2d):
         super(_DeepLabHead, self).__init__()
-        with self.name_scope():
-            self.block = nn.HybridSequential()
-
-            self.block.add(SeparableConv2D(256, in_channels=in_filters, dw_kernel=3, dw_padding=1,
+        block = []
+        block.append(SeparableConv2D(in_channels, 256, dw_kernel=3, dw_padding=1,
                                            activation='relu', norm_layer=norm_layer))
-            self.block.add(SeparableConv2D(256, in_channels=256, dw_kernel=3, dw_padding=1,
+        block.append(SeparableConv2D(256, 256, dw_kernel=3, dw_padding=1,
                                            activation='relu', norm_layer=norm_layer))
 
-            self.block.add(nn.Conv2D(channels=output_channels,
+        block.append(nn.Conv2d(256, out_channels,
                                      kernel_size=1))
+        self.block = nn.Sequential(*block)
 
-    def hybrid_forward(self, F, x):
+    def forward(self, x):
         return self.block(x)
 
 
-class _ASPP(nn.HybridBlock):
-    def __init__(self, in_channels, atrous_rates, out_channels=256,
-                 project_dropout=0.5,
-                 norm_layer=nn.BatchNorm):
+class _ASPP(nn.Module):
+    def __init__(self, in_channels=2048, out_channels=256, atrous_rates=[12, 24, 36], norm_layer=nn.BatchNorm2d):
         super(_ASPP, self).__init__()
-
-        b0 = nn.HybridSequential()
-        with b0.name_scope():
-            b0.add(nn.Conv2D(in_channels=in_channels, channels=out_channels,
-                             kernel_size=1, use_bias=False))
-            b0.add(norm_layer(in_channels=out_channels))
-            b0.add(nn.Activation("relu"))
+        self.conv1 = nn.Sequential()
+        self.conv1.add_module('conv', nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False))
+        self.conv1.add_module('bn', norm_layer(out_channels))
+        self.conv1.add_module('relu', nn.ReLU(inplace=True))
 
         rate1, rate2, rate3 = tuple(atrous_rates)
-        b1 = _ASPPConv(in_channels, out_channels, rate1, norm_layer)
-        b2 = _ASPPConv(in_channels, out_channels, rate2, norm_layer)
-        b3 = _ASPPConv(in_channels, out_channels, rate3, norm_layer)
-        b4 = _AsppPooling(in_channels, out_channels, norm_layer=norm_layer)
+        self.conv2 = _ASPPConv(in_channels, out_channels, rate1, norm_layer)
+        self.conv3 = _ASPPConv(in_channels, out_channels, rate2, norm_layer)
+        self.conv4 = _ASPPConv(in_channels, out_channels, rate3, norm_layer)
+        self.pool = _AsppPooling(in_channels, out_channels, norm_layer=norm_layer)
 
-        self.concurent = gluon.contrib.nn.HybridConcurrent(axis=1)
-        with self.concurent.name_scope():
-            self.concurent.add(b0)
-            self.concurent.add(b1)
-            self.concurent.add(b2)
-            self.concurent.add(b3)
-            self.concurent.add(b4)
+        self.project = nn.Sequential()
+        self.project.add_module('conv', nn.Conv2d(5*out_channels, out_channels, kernel_size=1, bias=False))
+        self.project.add_module('norm', norm_layer(out_channels))
+        self.project.add_module('relu', nn.ReLU(inplace=True))
+        self.project.add_module('dropout', nn.Dropout(0.5))
 
-        self.project = nn.HybridSequential()
-        with self.project.name_scope():
-            self.project.add(nn.Conv2D(in_channels=5*out_channels, channels=out_channels,
-                                       kernel_size=1, use_bias=False))
-            self.project.add(norm_layer(in_channels=out_channels))
-            self.project.add(nn.Activation("relu"))
-            if project_dropout > 0:
-                self.project.add(nn.Dropout(project_dropout))
-
-    def hybrid_forward(self, F, x):
-        return self.project(self.concurent(x))
+    def forward(self, x):
+        x = torch.cat([
+            self.conv1(x),
+            self.conv2(x),
+            self.conv3(x),
+            self.conv4(x),
+            self.pool(x),
+        ], 1)
+        return self.project(x)
 
 
-class _AsppPooling(nn.HybridBlock):
-    def __init__(self, in_channels, out_channels, norm_layer):
+class _AsppPooling(nn.Module):
+    def __init__(self, in_channels, out_channels, norm_layer, **kwargs):
         super(_AsppPooling, self).__init__()
         self._out_h = None
         self._out_w = None
-        self.gap = nn.HybridSequential()
-        with self.gap.name_scope():
-            self.gap.add(nn.GlobalAvgPool2D())
-            self.gap.add(nn.Conv2D(in_channels=in_channels, channels=out_channels,
-                                   kernel_size=1, use_bias=False))
-            self.gap.add(norm_layer(in_channels=out_channels))
-            self.gap.add(nn.Activation("relu"))
+        self.gap = nn.Sequential()
+        
+        self.gap.add_module('pool', nn.AdaptiveAvgPool2d((1, 1)))
+        self.gap.add_module('fc', nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False))
+        self.gap.add_module('bn', norm_layer(out_channels))
+        self.gap.add_module('relu', nn.ReLU(inplace=True))
 
-    def hybrid_forward(self, F, x):
+    def forward(self, x):
         if hasattr(x, 'shape'):
             _, _, h, w = x.shape
             self._out_h = h
@@ -139,17 +137,16 @@ class _AsppPooling(nn.HybridBlock):
         else:
             h, w = self._out_h, self._out_w
             assert h is not None
-
         pool = self.gap(x)
-        return F.contrib.BilinearResize2D(pool, height=h, width=w)
+        return F.interpolate(pool, (h, w), mode='bilinear')
 
 
 def _ASPPConv(in_channels, out_channels, atrous_rate, norm_layer):
-    block = nn.HybridSequential()
-    with block.name_scope():
-        block.add(nn.Conv2D(in_channels=in_channels, channels=out_channels,
-                            kernel_size=3, padding=atrous_rate,
-                            dilation=atrous_rate, use_bias=False))
-        block.add(norm_layer(in_channels=out_channels))
-        block.add(nn.Activation('relu'))
+    block = nn.Sequential()
+    block.add_module('conv', nn.Conv2d(in_channels, out_channels,
+                                        kernel_size=3, padding=atrous_rate,
+                                        dilation=atrous_rate, bias=False))
+    block.add_module('bn', norm_layer(out_channels))
+    block.add_module('relu', nn.ReLU(inplace=True))
     return block
+
