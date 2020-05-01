@@ -104,6 +104,7 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0):
     trainer = AdaptISTrainer(args, model, model_cfg, loss_cfg,
                              trainset, valset,
                              num_epochs=num_epochs,
+                             optimizer='adam',
                              optimizer_params=optimizer_params,
                              lr_scheduler=lr_scheduler,
                              checkpoint_interval=40 if not train_proposals else 5,

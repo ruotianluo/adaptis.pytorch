@@ -15,6 +15,7 @@ from adaptis.utils import log, vis, misc
 class AdaptISTrainer(object):
     def __init__(self, args, model, model_cfg, loss_cfg,
                  trainset, valset,
+                 optimizer,
                  optimizer_params,
                  image_dump_interval=200,
                  checkpoint_interval=10,
@@ -56,7 +57,12 @@ class AdaptISTrainer(object):
 
         if train_proposals:
             self.task_prefix = 'proposals'
-        self.optim = torch.optim.Adam(self.net.get_trainable_params(), **optimizer_params)
+        # process lr_mult
+        param_groups = [{'params': p, 'lr': optimizer_params['lr'] * getattr(p, 'lr_mult', 1)} for p in self.net.parameters()]
+        if optimizer == 'sgd':
+            self.optim = torch.optim.SGD(param_groups, **optimizer_params)
+        else:
+            self.optim = torch.optim.Adam(param_groups, **optimizer_params)
         self.tqdm_out = log.TqdmToLogger(log.logger, level=log.logging.INFO)
 
         self.lr_scheduler = None
@@ -134,7 +140,7 @@ class AdaptISTrainer(object):
 
             self.summary_writer.add_scalar(
                 tag=f'{log_prefix}States/learning_rate',
-                value=self.lr if self.lr_scheduler is None else self.lr_scheduler.get_lr(),
+                value=self.lr if self.lr_scheduler is None else np.array(self.lr_scheduler.get_lr()).max(),
                 global_step=global_step
             )
 
