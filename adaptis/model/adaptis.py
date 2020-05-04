@@ -62,7 +62,7 @@ class AdaptIS(nn.Module):
         if self.with_proposals:
             backbone_features = backbone_features.detach()
             proposals_out = self.proposals_head(backbone_features)
-            proposals_out = self.adaptis_head.EQF(proposals_out, points.detach())
+            proposals_out = self.adaptis_head.eqf(proposals_out, points.detach())
             outputs.append(('proposals', proposals_out))
 
         return self.make_named_outputs(outputs)
