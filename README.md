@@ -30,6 +30,10 @@ We trained our model on the original/train part with online augmentations and te
 * You can test and visualize trained model on the toy dataset using [provided](notebooks/test_toy_model.ipynb) Jupyter Notebook.
 * You can download pretrained model from [here](https://drive.google.com/file/d/1n1UzzNN_9H2F71xyhKckJDr8XHDSJ-py).
 
+### Cityscapes dataset
+
+* You can test and visualize trained model on the cityscapes dataset using [provided](notebooks/test_cityscapes_model.ipynb) Jupyter Notebook.
+* You can download pretrained model from [here](https://drive.google.com/open?id=1C_95y2bYHuo3Y8RXUkaIP5UsZlzsicVr).
 
 ### Setting up a development environment
 
@@ -64,7 +68,7 @@ To train ResNet-50 model for Cityscapes use the script:
 python3 train_cityscapes.py --batch-size=8 --workers=2 --dist --gpus=0,1 --dataset-path=<cityscapes-path>
 ```
 
-(Note that, you need to convert gluon resnet weights into pytorch)
+(Note that, you need to convert gluon resnet weights into pytorch, or download from [link](https://drive.google.com/open?id=1Hrwtlo2XtqULCivW8N-KaEhj9bc5nUs5))
 ```
 import torch
 import mxnet as mx
