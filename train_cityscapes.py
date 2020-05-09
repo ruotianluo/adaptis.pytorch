@@ -165,7 +165,7 @@ def train(model, model_cfg, args, train_proposals, start_epoch=0,
     log.logger.info(f'Total Epochs: {num_epochs}')
     for epoch in range(start_epoch, num_epochs):
         trainer.training(epoch)
-        trainer.validation(epoch)
+        # trainer.validation(epoch)
 
 def main(rank, ngpus, args, port):
     distributed = rank is not None  # and not debug
