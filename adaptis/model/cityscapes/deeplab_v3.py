@@ -23,20 +23,7 @@ class DeepLabV3Plus(nn.Module):
         self.aspp = _ASPP(2048, 256, [12, 24, 36], **kwargs)
 
     def load_pretrained_weights(self):
-        # load from gluon
-        # Unfortunately that's the only way
-
-        # import mxnet as mx
-        # from gluoncv.model_zoo.model_store import get_model_file
-        # state_dict = mx.ndarray.load(
-        #     get_model_file(self.backbone_name+'_v1s', tag=True, root='~/.mxnet/models'))
-        # state_dict = {k.replace('gamma', 'weight').replace('beta', 'bias'):\
-        #               torch.from_numpy(v.asnumpy()) for k,v in state_dict.items()}
-        
-        # The above works for single process.
-        # For some reason, mx.load doesn't work with mulitprocessing
-        # We preprocess the gluon weights and save it in the root
-        state_dict = torch.load('resnet50_v1s.pth')
+        state_dict = torch.load('resnet50s-a75c83cf.pth')
         self.backbone.load_state_dict(state_dict, strict=False)
         for p in self.backbone.parameters():
             p.lr_mult = self.backbone_lr_mult
