@@ -35,6 +35,9 @@ We trained our model on the original/train part with online augmentations and te
 * You can test and visualize trained model on the cityscapes dataset using [provided](notebooks/test_cityscapes_model.ipynb) Jupyter Notebook.
 * You can download pretrained model from [here](https://drive.google.com/open?id=1C_95y2bYHuo3Y8RXUkaIP5UsZlzsicVr).
 
+### COCO dataset
+* You can now train with train_coco.py, but it's still experimental.
+
 ### Setting up a development environment
 
 AdaptIS is built using Python 3.6 and relies on the most recent version of PyTorch. This code was tested with PyTorch 1.3.0 and TorchVision 0.4.1. The following command installs all necessary packages:
